@@ -17,7 +17,6 @@ var (
 	ignore        = flag.String("i", env(`FILES_IGNORE_PATTERN`, `^(\.git|\.hg|\.svn|_darcs|\.bzr)$`), "Ignore directory")
 	progress      = flag.Bool("p", false, "Progress message")
 	absolute      = flag.Bool("a", false, "Display absolute path")
-	fsort         = flag.Bool("s", false, "Sort results")
 	match         = flag.String("m", "", "Display matched files")
 	maxfiles      = flag.Int64("M", -1, "Max files")
 	directoryOnly = flag.Bool("d", false, "Directory only")
@@ -180,18 +179,7 @@ func main() {
 			}
 		}
 	}()
-	if *fsort {
-		fs := []string{}
-		for s := range q {
-			fs = append(fs, s)
-		}
-		sort.Strings(fs)
-		for _, s := range fs {
-			printLine(s)
-		}
-	} else {
-		for s := range q {
-			printLine(s)
-		}
+	for s := range q {
+		printLine(s)
 	}
 }
