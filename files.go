@@ -109,7 +109,7 @@ func filesAsync(base string) chan string {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		sem := make(chan struct{}, 16)
+		sem := make(chan struct{}, runtime.NumCPU())
 		ferr = walk(base, fileInfo{fi}, ignMatchers, func(path string, fi fileInfo, matchers ignoreMatchers) (ignoreMatchers, error) {
 
 
