@@ -4,13 +4,17 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"sort"
 	"strings"
 	"sync"
+
+	"github.com/monochromegane/go-gitignore"
+	"github.com/monochromegane/go-home"
 )
 
 var (
@@ -19,7 +23,7 @@ var (
 	absolute      = flag.Bool("a", false, "Display absolute path")
 	match         = flag.String("m", "", "Display matched files")
 	maxfiles      = flag.Int64("M", -1, "Max files")
-	directoryOnly = flag.Bool("d", false, "Directory only")
+	careGitignore = flag.Bool("g", false, "care gitignore")
 )
 
 var (
@@ -36,70 +40,60 @@ func env(key, def string) string {
 	return def
 }
 
+func globalGitIgnoreName() string {
+	gitCmd, err := exec.LookPath("git")
+	if err != nil {
+		return ""
+	}
+	file, err := exec.Command(gitCmd, "config", "--get", "core.excludesfile").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(filepath.Base(string(file)))
+}
+
+type fileInfo struct {
+	os.FileInfo
+}
+
+func (f fileInfo) isSymlink() bool {
+	return f.FileInfo.Mode()&os.ModeSymlink == os.ModeSymlink
+}
+
+type ignoreMatchers []gitignore.IgnoreMatcher
+
+func (im ignoreMatchers) Match(path string, isDir bool) bool {
+	for _, ig := range im {
+		if ig == nil {
+			return false
+		}
+		if ig.Match(path, isDir) {
+			return true
+		}
+	}
+	return false
+}
+
+type walkFunc func(path string, info fileInfo, ignores ignoreMatchers) (ignoreMatchers, error)
+
 func filesAsync(base string) chan string {
 	wg := new(sync.WaitGroup)
-
-	runtime.GOMAXPROCS(runtime.NumCPU())
 
 	q := make(chan string, 20)
 	n := int64(0)
 
-	var ferr error
-	var fn func(p string)
-	fn = func(p string) {
-		defer wg.Done()
-
-		f, err := os.Open(p)
-		if err != nil {
-			return
-		}
-		defer f.Close()
-
-		fis, err := f.Readdir(-1)
-		if err != nil {
-			return
-		}
-
-		processMatch := func(p string, fi os.FileInfo) error {
-			n++
-			// This is pseudo handling because this is not atomic
-			if n > maxcount {
-				return maxError
-			}
-			if *progress {
-				if n%10 == 0 {
-					fmt.Fprintf(os.Stderr, "\r%d            \r", n)
-				}
-			}
-			q <- filepath.ToSlash(filepath.Join(p, fi.Name()))
-
-			return nil
-		}
-
-		for _, fi := range fis {
-			if ignorere.MatchString(fi.Name()) {
-				continue
-			}
-			if *directoryOnly {
-				if fi.IsDir() {
-					wg.Add(1)
-					go fn(filepath.Join(p, fi.Name()))
-					if ferr = processMatch(p, fi); ferr != nil {
-						return
-					}
-				}
-			} else {
-				if fi.IsDir() {
-					wg.Add(1)
-					go fn(filepath.Join(p, fi.Name()))
-				} else {
-					if ferr = processMatch(p, fi); ferr != nil {
-						return
-					}
+	var ignMatchers ignoreMatchers
+	if *careGitignore {
+		if homeDir := home.Dir(); homeDir != "" {
+			globalIgnore := globalGitIgnoreName()
+			if globalIgnore != "" {
+				if matcher, err := gitignore.NewGitIgnore(filepath.Join(homeDir, globalIgnore), base); err == nil {
+					ignMatchers = append(ignMatchers, matcher)
 				}
 			}
 		}
 	}
+	gitignoreFile := ".gitignore"
 
 	fi, err := os.Lstat(base)
 	if err != nil {
@@ -111,8 +105,48 @@ func filesAsync(base string) chan string {
 		os.Exit(1)
 	}
 
+	var ferr error
 	wg.Add(1)
-	go fn(base)
+	go func() {
+		defer wg.Done()
+		ferr = walk(base, fileInfo{fi}, ignMatchers, func(path string, fi fileInfo, matchers ignoreMatchers) (ignoreMatchers, error) {
+
+
+			var newMatchers ignoreMatchers
+			if *careGitignore && fi.IsDir() && !fi.isSymlink() {
+				if matcher, err := gitignore.NewGitIgnore(filepath.Join(path, gitignoreFile)); err == nil {
+					newMatchers = make(ignoreMatchers, len(matchers)+1)
+					copy(newMatchers, matchers)
+					newMatchers[len(matchers)] = matcher
+				} else {
+					newMatchers = matchers
+				}
+			} else {
+			}
+
+			if ignorere.MatchString(fi.Name()) || *careGitignore && newMatchers.Match(path, fi.IsDir()) {
+				var err error
+				if fi.IsDir() {
+					err = filepath.SkipDir
+				}
+				return newMatchers, err
+			}
+			if !fi.IsDir() {
+				n++
+				// This is pseudo handling because this is not atomic
+				if n > maxcount {
+					return newMatchers, maxError
+				}
+				if *progress {
+					if n%10 == 0 {
+						fmt.Fprintf(os.Stderr, "\r%d            \r", n)
+					}
+				}
+				q <- filepath.ToSlash(path)
+			}
+			return newMatchers, nil
+		})
+	}()
 
 	go func() {
 		wg.Wait()
@@ -122,6 +156,39 @@ func filesAsync(base string) chan string {
 		}
 	}()
 	return q
+}
+
+func walk(path string, info fileInfo, parentIgnores ignoreMatchers, walkFn walkFunc) error {
+	ignores, walkError := walkFn(path, info, parentIgnores)
+	if walkError != nil {
+		if info.IsDir() && walkError == filepath.SkipDir {
+			return nil
+		}
+		return walkError
+	}
+	if info.isSymlink() || !info.IsDir() {
+		return nil
+	}
+
+	files, err := ioutil.ReadDir(path)
+	if err != nil {
+		return err
+	}
+	var ferr error
+	wg := &sync.WaitGroup{}
+	for _, file := range files {
+		f := fileInfo{file}
+		wg.Add(1)
+		go func(path string, file fileInfo, ignores ignoreMatchers) {
+			defer wg.Done()
+			err := walk(path, file, ignores, walkFn)
+			if err != nil {
+				ferr = err
+			}
+		}(filepath.Join(path, file.Name()), f, ignores)
+	}
+	wg.Wait()
+	return ferr
 }
 
 func main() {
