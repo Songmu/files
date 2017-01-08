@@ -109,6 +109,7 @@ func filesAsync(base string) chan string {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		sem := make(chan struct{}, 16)
 		ferr = walk(base, fileInfo{fi}, ignMatchers, func(path string, fi fileInfo, matchers ignoreMatchers) (ignoreMatchers, error) {
 
 
@@ -145,7 +146,7 @@ func filesAsync(base string) chan string {
 				q <- filepath.ToSlash(path)
 			}
 			return newMatchers, nil
-		})
+		}, sem)
 	}()
 
 	go func() {
@@ -158,7 +159,7 @@ func filesAsync(base string) chan string {
 	return q
 }
 
-func walk(path string, info fileInfo, parentIgnores ignoreMatchers, walkFn walkFunc) error {
+func walk(path string, info fileInfo, parentIgnores ignoreMatchers, walkFn walkFunc, sem chan struct{}) error {
 	ignores, walkError := walkFn(path, info, parentIgnores)
 	if walkError != nil {
 		if info.IsDir() && walkError == filepath.SkipDir {
@@ -178,14 +179,23 @@ func walk(path string, info fileInfo, parentIgnores ignoreMatchers, walkFn walkF
 	wg := &sync.WaitGroup{}
 	for _, file := range files {
 		f := fileInfo{file}
-		wg.Add(1)
-		go func(path string, file fileInfo, ignores ignoreMatchers) {
-			defer wg.Done()
-			err := walk(path, file, ignores, walkFn)
+		select {
+		case sem <- struct{}{}:
+			wg.Add(1)
+			go func(path string, file fileInfo, ignores ignoreMatchers) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				err := walk(path, file, ignores, walkFn, sem)
+				if err != nil {
+					ferr = err
+				}
+			}(filepath.Join(path, file.Name()), f, ignores)
+		default:
+			err := walk(filepath.Join(path, file.Name()), f, ignores, walkFn, sem)
 			if err != nil {
 				ferr = err
 			}
-		}(filepath.Join(path, file.Name()), f, ignores)
+		}
 	}
 	wg.Wait()
 	return ferr
