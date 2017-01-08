@@ -113,30 +113,24 @@ func filesAsync(base string) chan string {
 		ferr = walk(base, fileInfo{fi}, ignMatchers, func(path string, fi fileInfo, matchers ignoreMatchers) (ignoreMatchers, error) {
 
 
-			var newMatchers ignoreMatchers
 			if *careGitignore && fi.IsDir() && !fi.isSymlink() {
 				if matcher, err := gitignore.NewGitIgnore(filepath.Join(path, gitignoreFile)); err == nil {
-					newMatchers = make(ignoreMatchers, len(matchers)+1)
-					copy(newMatchers, matchers)
-					newMatchers[len(matchers)] = matcher
-				} else {
-					newMatchers = matchers
+					matchers = append(matchers, matcher)
 				}
-			} else {
 			}
 
-			if ignorere.MatchString(fi.Name()) || *careGitignore && newMatchers.Match(path, fi.IsDir()) {
+			if ignorere.MatchString(fi.Name()) || *careGitignore && matchers.Match(path, fi.IsDir()) {
 				var err error
 				if fi.IsDir() {
 					err = filepath.SkipDir
 				}
-				return newMatchers, err
+				return matchers, err
 			}
 			if !fi.IsDir() {
 				n++
 				// This is pseudo handling because this is not atomic
 				if n > maxcount {
-					return newMatchers, maxError
+					return matchers, maxError
 				}
 				if *progress {
 					if n%10 == 0 {
@@ -145,7 +139,7 @@ func filesAsync(base string) chan string {
 				}
 				q <- filepath.ToSlash(path)
 			}
-			return newMatchers, nil
+			return matchers, nil
 		}, sem)
 	}()
 
