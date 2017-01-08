@@ -16,7 +16,6 @@ import (
 var (
 	ignore        = flag.String("i", env(`FILES_IGNORE_PATTERN`, `^(\.git|\.hg|\.svn|_darcs|\.bzr)$`), "Ignore directory")
 	progress      = flag.Bool("p", false, "Progress message")
-	async         = flag.Bool("A", false, "Asynchronized find")
 	absolute      = flag.Bool("a", false, "Display absolute path")
 	fsort         = flag.Bool("s", false, "Sort results")
 	match         = flag.String("m", "", "Display matched files")
@@ -36,80 +35,6 @@ func env(key, def string) string {
 		return v
 	}
 	return def
-}
-
-func filesSync(base string) chan string {
-	q := make(chan string, 20)
-
-	go func() {
-		n := int64(0)
-		sep := string(os.PathSeparator)
-		if !strings.HasSuffix(base, sep) {
-			base += sep
-		}
-		processMatch := func(path string, info os.FileInfo) error {
-			if matchre != nil && !matchre.MatchString(info.Name()) {
-				return nil
-			}
-
-			n++
-			if n > maxcount {
-				return maxError
-			}
-			if *progress {
-				if n%10 == 0 {
-					fmt.Fprintf(os.Stderr, "\r%d            \r", n)
-				}
-			}
-			q <- filepath.ToSlash(path)
-
-			return nil
-		}
-
-		var err error
-		if *directoryOnly {
-			err = filepath.Walk(base, func(path string, info os.FileInfo, err error) error {
-				if info == nil {
-					return err
-				}
-				name := info.Name()
-				if info.IsDir() && name != "." {
-					if ignorere.MatchString(name) {
-						return filepath.SkipDir
-					}
-					return processMatch(path, info)
-				}
-				return nil
-			})
-		} else {
-			err = filepath.Walk(base, func(path string, info os.FileInfo, err error) error {
-				if info == nil {
-					return err
-				}
-				name := info.Name()
-				if !info.IsDir() {
-					if ignorere.MatchString(name) {
-						return nil
-					}
-					return processMatch(path, info)
-				} else {
-					if ignorere.MatchString(name) {
-						return filepath.SkipDir
-					}
-				}
-				return nil
-			})
-		}
-
-		if err != nil && err != maxError {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-
-		close(q)
-	}()
-
-	return q
 }
 
 func filesAsync(base string) chan string {
@@ -242,13 +167,7 @@ func main() {
 		}
 	}
 
-	var q chan string
-
-	if *async {
-		q = filesAsync(base)
-	} else {
-		q = filesSync(base)
-	}
+	q := filesAsync(base)
 
 	printLine := func() func(string) {
 		if *absolute && !filepath.IsAbs(base) {
