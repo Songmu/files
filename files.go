@@ -77,8 +77,6 @@ func (im ignoreMatchers) Match(path string, isDir bool) bool {
 type walkFunc func(path string, info fileInfo, ignores ignoreMatchers) (ignoreMatchers, error)
 
 func filesAsync(base string) chan string {
-	wg := new(sync.WaitGroup)
-
 	q := make(chan string, 20)
 	n := int64(0)
 
@@ -106,9 +104,9 @@ func filesAsync(base string) chan string {
 	}
 
 	var ferr error
-	wg.Add(1)
+	done := make(chan struct{})
 	go func() {
-		defer wg.Done()
+		defer func() { done <- struct{}{} }()
 		sem := make(chan struct{}, runtime.NumCPU())
 		ferr = walk(base, fileInfo{fi}, ignMatchers, func(path string, fi fileInfo, matchers ignoreMatchers) (ignoreMatchers, error) {
 
@@ -144,7 +142,7 @@ func filesAsync(base string) chan string {
 	}()
 
 	go func() {
-		wg.Wait()
+		<-done
 		close(q)
 		if ferr != nil {
 			fmt.Fprintln(os.Stderr, ferr)
